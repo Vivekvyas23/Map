@@ -6,9 +6,10 @@ from pyrosm import OSM
 import numpy as np
 import pandas as pd
 import math
+import os
 
 # Path to your OSM PBF file
-PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"
+PBF_PATH = "indore.osm.pbf"
 
 # ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -49,8 +50,7 @@ def offline_geocode(query):
 
 # ----------------- Streamlit Layout -----------------
 st.set_page_config(page_title="Smart Routing - Indore", layout="wide")
-
-st.title("🚦 Smart Traffic Routing - Indore (Offline)")
+st.title("🚦 Smart Traffic Routing - Indore")
 
 # Sidebar inputs
 st.sidebar.header("Route Planner")
@@ -60,7 +60,7 @@ K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
 
 run_button = st.sidebar.button("Find Routes")
 
-# Only compute when button pressed
+# ----------------- Route Computation -----------------
 if run_button:
     s_loc = offline_geocode(start_text)
     e_loc = offline_geocode(end_text)
@@ -135,10 +135,12 @@ if run_button:
             if len(routes) >= K:
                 break
 
-        best_route = min(routes, key=lambda r: r["weight"])
+        if len(routes) == 0:
+            st.error("❌ No routes found")
+        else:
+            best_route = min(routes, key=lambda r: r["weight"])
 
-        # Map rendering inside a stable container
-        with st.container():
+            # Map rendering
             m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13, tiles="cartodbpositron")
             folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
             folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
@@ -155,14 +157,21 @@ if run_button:
                 else:
                     folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
 
-            st_folium(m, width=1000, height=500)
+            # Store map + results in session_state
+            st.session_state["map_obj"] = m
+            st.session_state["routes"] = routes
+            st.session_state["best_route"] = best_route
 
-        # Summary
-        st.subheader("📌 5 Point Summary")
-        st.markdown(f"""
-        - Best route selected: **{start_text} → {end_text}**  
-        - Total distance: **{best_route['length']/1000:.2f} km**  
-        - Estimated time: **{(best_route['length']/1000/25)*60:.1f} min**  
-        - Vehicles on route: **{best_route['vehicles']}**  
-        - Alternate routes: **{len(routes)-1}** explored  
-        """)
+# ----------------- Display Map Persistently -----------------
+if "map_obj" in st.session_state:
+    st_folium(st.session_state["map_obj"], width=1000, height=500)
+
+    best_route = st.session_state["best_route"]
+    st.subheader("📌 5 Point Summary")
+    st.markdown(f"""
+    - Best route selected: **{start_text} → {end_text}**  
+    - Total distance: **{best_route['length']/1000:.2f} km**  
+    - Estimated time: **{(best_route['length']/1000/25)*60:.1f} min**  
+    - Vehicles on route: **{best_route['vehicles']}**  
+    - Alternate routes: **{len(st.session_state['routes'])-1}** explored  
+    """)
