@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import math
 
-PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"   # <-- path to your PBF file
+PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"   # <-- Path to your PBF file
 
 # ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -30,96 +30,137 @@ def color_cycle(n):
             "cadetblue", "black", "pink", "brown"]
     return [base[i % len(base)] for i in range(n)]
 
+# ----------------- Offline POI Loader -----------------
+@st.cache_resource
+def load_places():
+    osm = OSM(PBF_PATH)
+    return osm.get_pois(custom_filter={"name": True})
+
+places = load_places()
+
+def offline_geocode(query):
+    results = places[places["name"].str.contains(query, case=False, na=False)]
+    if len(results) == 0:
+        return None
+    row = results.iloc[0]
+    return {"latitude": row["lat"], "longitude": row["lon"], "name": row["name"]}
+
 # ----------------- Streamlit -----------------
 st.set_page_config(page_title="Traffic Routing", layout="wide")
 st.title("🚦 Traffic-Aware Routing (Indore)")
 
 # Sidebar input
-start_lat = st.sidebar.number_input("Start Latitude", value=22.7196)
-start_lon = st.sidebar.number_input("Start Longitude", value=75.8577)
-end_lat = st.sidebar.number_input("End Latitude", value=22.7500)
-end_lon = st.sidebar.number_input("End Longitude", value=75.9000)
+st.sidebar.header("Route Planner")
+start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
+end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
 K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
 
+# -------- Run only when button pressed --------
 if st.sidebar.button("Find Route"):
-    # Load OSM
-    osm = OSM(PBF_PATH)
-    nodes_all, edges_all = osm.get_network(nodes=True, network_type="driving")
+    s_loc = offline_geocode(start_text)
+    e_loc = offline_geocode(end_text)
 
-    # Crop bounding box
-    lat_min, lat_max = min(start_lat, end_lat)-0.02, max(start_lat, end_lat)+0.02
-    lon_min, lon_max = min(start_lon, end_lon)-0.02, max(start_lon, end_lon)+0.02
-    nodes = nodes_all[(nodes_all["lat"] >= lat_min) & (nodes_all["lat"] <= lat_max) &
-                      (nodes_all["lon"] >= lon_min) & (nodes_all["lon"] <= lon_max)]
-    node_ids = set(nodes["id"].astype(int).tolist())
-    edges = edges_all[edges_all["u"].isin(node_ids) & edges_all["v"].isin(node_ids)].copy()
+    if not s_loc or not e_loc:
+        st.error("❌ Could not find one of the addresses in OSM data")
+    else:
+        s_lat, s_lon = s_loc["latitude"], s_loc["longitude"]
+        e_lat, e_lon = e_loc["latitude"], e_loc["longitude"]
 
-    # Build graph with random vehicle counts
-    G = nx.DiGraph()
-    for _, r in nodes.iterrows():
-        vid = int(r["id"])
-        veh_count = np.random.randint(20, 200)
-        G.add_node(vid, x=float(r["lon"]), y=float(r["lat"]), vehicles=veh_count)
+        # Load OSM network
+        osm = OSM(PBF_PATH)
+        nodes_all, edges_all = osm.get_network(nodes=True, network_type="driving")
 
-    if "length" not in edges.columns:
-        def geodesic_len(row):
-            geom = row.geometry
-            coords = list(geom.coords) if geom else []
-            total = 0.0
-            for (x1, y1), (x2, y2) in zip(coords[:-1], coords[1:]):
-                total += haversine_m(y1, x1, y2, x2)
-            return total
-        edges["length"] = edges.apply(geodesic_len, axis=1)
+        # Crop bounding box
+        lat_min, lat_max = min(s_lat, e_lat)-0.02, max(s_lat, e_lat)+0.02
+        lon_min, lon_max = min(s_lon, e_lon)-0.02, max(s_lon, e_lon)+0.02
+        nodes = nodes_all[(nodes_all["lat"] >= lat_min) & (nodes_all["lat"] <= lat_max) &
+                          (nodes_all["lon"] >= lon_min) & (nodes_all["lon"] <= lon_max)]
+        node_ids = set(nodes["id"].astype(int).tolist())
+        edges = edges_all[edges_all["u"].isin(node_ids) & edges_all["v"].isin(node_ids)].copy()
 
-    for _, r in edges.iterrows():
-        u, v = int(r["u"]), int(r["v"])
-        if u not in G.nodes or v not in G.nodes: 
-            continue
-        length = float(r["length"]) if pd.notna(r["length"]) else 1.0
-        u_veh, v_veh = G.nodes[u]["vehicles"], G.nodes[v]["vehicles"]
-        weight = length + ((u_veh+v_veh)/2)*5
-        G.add_edge(u, v, length=length, weight=weight)
+        # Build graph with random traffic at nodes
+        G = nx.DiGraph()
+        for _, r in nodes.iterrows():
+            vid = int(r["id"])
+            veh_count = np.random.randint(20, 200)
+            G.add_node(vid, x=float(r["lon"]), y=float(r["lat"]), vehicles=veh_count)
 
-    # Nearest nodes
-    s_node = nearest_node(nodes, start_lat, start_lon)
-    e_node = nearest_node(nodes, end_lat, end_lon)
+        if "length" not in edges.columns:
+            def geodesic_len(row):
+                geom = row.geometry
+                coords = list(geom.coords) if geom else []
+                total = 0.0
+                for (x1, y1), (x2, y2) in zip(coords[:-1], coords[1:]):
+                    total += haversine_m(y1, x1, y2, x2)
+                return total
+            edges["length"] = edges.apply(geodesic_len, axis=1)
 
-    # Compute routes
-    paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
-    routes = []
-    for idx, path in enumerate(paths_iter):
-        L, w, vehicles = 0.0, 0.0, 0
-        for n in path:
-            vehicles += G.nodes[n]["vehicles"]
-        for i in range(len(path)-1):
-            d = G[path[i]][path[i+1]]
-            d = d if isinstance(d, dict) else list(d.values())[0]
-            L += d.get("length", 0.0)
-            w += d.get("weight", d.get("length", 0.0))
-        routes.append({"path": path, "length": L, "weight": w, "vehicles": vehicles})
-        if idx >= K-1:
-            break
+        for _, r in edges.iterrows():
+            u, v = int(r["u"]), int(r["v"])
+            if u not in G.nodes or v not in G.nodes: 
+                continue
+            length = float(r["length"]) if pd.notna(r["length"]) else 1.0
+            u_veh, v_veh = G.nodes[u]["vehicles"], G.nodes[v]["vehicles"]
+            weight = length + ((u_veh+v_veh)/2)*5
+            G.add_edge(u, v, length=length, weight=weight)
 
-    best_route = min(routes, key=lambda r: r["weight"])
+        # Nearest nodes
+        s_node = nearest_node(nodes, s_lat, s_lon)
+        e_node = nearest_node(nodes, e_lat, e_lon)
 
-    # Build folium map
-    m = folium.Map(location=[(start_lat+end_lat)/2, (start_lon+end_lon)/2], zoom_start=13)
-    folium.Marker([start_lat, start_lon], tooltip="Start", icon=folium.Icon(color="green")).add_to(m)
-    folium.Marker([end_lat, end_lon], tooltip="End", icon=folium.Icon(color="red")).add_to(m)
+        # Compute routes
+        paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
+        routes = []
+        for idx, path in enumerate(paths_iter):
+            L, w, vehicles = 0.0, 0.0, 0
+            for n in path:
+                vehicles += G.nodes[n]["vehicles"]
+            for i in range(len(path)-1):
+                d = G[path[i]][path[i+1]]
+                d = d if isinstance(d, dict) else list(d.values())[0]
+                L += d.get("length", 0.0)
+                w += d.get("weight", d.get("length", 0.0))
+            routes.append({"path": path, "length": L, "weight": w, "vehicles": vehicles})
+            if idx >= K-1:
+                break
 
-    cols = color_cycle(len(routes))
-    for i, r in enumerate(routes, start=1):
-        coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in r["path"]]
-        label = f"Route {i}: {r['length']/1000:.2f} km, {r['vehicles']} vehicles"
-        if r is best_route:
-            folium.PolyLine(coords, color="green", weight=8, opacity=1, tooltip=label).add_to(m)
-        else:
-            folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
+        best_route = min(routes, key=lambda r: r["weight"])
 
-    # Store map persistently
-    st.session_state["map_obj"] = m
-    st.session_state["best_route"] = best_route
+        # Build folium map
+        m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13)
+        folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
+        folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
 
-# Only render saved map
+        cols = color_cycle(len(routes))
+        for i, r in enumerate(routes, start=1):
+            coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in r["path"]]
+            label = f"Route {i}: {r['length']/1000:.2f} km, {r['vehicles']} vehicles"
+            if r is best_route:
+                folium.PolyLine(coords, color="green", weight=8, opacity=1, tooltip=label).add_to(m)
+            else:
+                folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
+
+            # Add vehicle count at intersections
+            for n in r["path"]:
+                if G.degree(n) >= 3:
+                    folium.CircleMarker(
+                        [G.nodes[n]["y"], G.nodes[n]["x"]],
+                        radius=5, color="black", fill=True, fill_color="yellow",
+                        tooltip=f"Node {n}: {G.nodes[n]['vehicles']} vehicles"
+                    ).add_to(m)
+
+        # Save map so it persists (no blinking)
+        st.session_state["map_obj"] = m
+        st.session_state["best_route"] = best_route
+
+# -------- Display Saved Map (persistent) --------
 if "map_obj" in st.session_state:
     st_folium(st.session_state["map_obj"], width=1000, height=500)
+    best_route = st.session_state["best_route"]
+    st.subheader("📌 Summary")
+    st.markdown(f"""
+    - Best route: **{start_text} → {end_text}**  
+    - Distance: **{best_route['length']/1000:.2f} km**  
+    - Vehicles: **{best_route['vehicles']}**  
+    - Alternatives: **{K-1}**  
+    """)
