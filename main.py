@@ -8,7 +8,7 @@ import pandas as pd
 import math
 
 # Path to your OSM PBF file
-PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"
+PBF_PATH = "indore.osm.pbf"
 
 # ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -50,92 +50,95 @@ def offline_geocode(query):
 # ----------------- Streamlit Layout -----------------
 st.set_page_config(page_title="Smart Routing - Indore", layout="wide")
 
-tabs = st.tabs(["📊 Dashboard", "📈 Analytics", "🎥 Footages"])
+st.title("🚦 Smart Traffic Routing - Indore (Offline)")
 
-with tabs[0]:
-    st.title("🚦 Smart Traffic Routing - Indore (Offline)")
+# Sidebar inputs
+st.sidebar.header("Route Planner")
+start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
+end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
+K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
 
-    # Sidebar inputs
-    st.sidebar.header("Route Planner")
-    start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
-    end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
-    K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
+run_button = st.sidebar.button("Find Routes")
 
-    run_button = st.sidebar.button("Find Routes")
+# Only compute when button pressed
+if run_button:
+    s_loc = offline_geocode(start_text)
+    e_loc = offline_geocode(end_text)
 
-    if run_button:
-        # Use offline geocoding
-        s_loc = offline_geocode(start_text)
-        e_loc = offline_geocode(end_text)
+    if not s_loc or not e_loc:
+        st.error("❌ Could not find one of the addresses in local OSM data")
+    else:
+        s_lat, s_lon = s_loc["latitude"], s_loc["longitude"]
+        e_lat, e_lon = e_loc["latitude"], e_loc["longitude"]
 
-        if not s_loc or not e_loc:
-            st.error("❌ Could not find one of the addresses in local OSM data")
-        else:
-            s_lat, s_lon = s_loc["latitude"], s_loc["longitude"]
-            e_lat, e_lon = e_loc["latitude"], e_loc["longitude"]
+        # Load OSM network
+        osm = OSM(PBF_PATH)
+        nodes_all, edges_all = osm.get_network(nodes=True, network_type="driving")
 
-            # Load OSM network
-            osm = OSM(PBF_PATH)
-            nodes_all, edges_all = osm.get_network(nodes=True, network_type="driving")
+        # Crop bounding box
+        lat_min, lat_max = min(s_lat, e_lat)-0.02, max(s_lat, e_lat)+0.02
+        lon_min, lon_max = min(s_lon, e_lon)-0.02, max(s_lon, e_lon)+0.02
+        nodes = nodes_all[(nodes_all["lat"] >= lat_min) & (nodes_all["lat"] <= lat_max) &
+                          (nodes_all["lon"] >= lon_min) & (nodes_all["lon"] <= lon_max)]
+        node_ids = set(nodes["id"].astype(int).tolist())
+        edges = edges_all[edges_all["u"].isin(node_ids) & edges_all["v"].isin(node_ids)].copy()
 
-            # Crop bounding box
-            lat_min, lat_max = min(s_lat, e_lat)-0.02, max(s_lat, e_lat)+0.02
-            lon_min, lon_max = min(s_lon, e_lon)-0.02, max(s_lon, e_lon)+0.02
-            nodes = nodes_all[(nodes_all["lat"] >= lat_min) & (nodes_all["lat"] <= lat_max) &
-                              (nodes_all["lon"] >= lon_min) & (nodes_all["lon"] <= lon_max)]
-            node_ids = set(nodes["id"].astype(int).tolist())
-            edges = edges_all[edges_all["u"].isin(node_ids) & edges_all["v"].isin(node_ids)].copy()
+        # Build graph with random node traffic
+        G = nx.DiGraph()
+        np.random.seed()
+        for _, r in nodes.iterrows():
+            vid = int(r["id"])
+            veh_count = np.random.randint(20, 200)  # random traffic
+            G.add_node(vid, x=float(r["lon"]), y=float(r["lat"]), vehicles=veh_count)
 
-            # Build graph with random node traffic
-            G = nx.DiGraph()
-            np.random.seed()
-            for _, r in nodes.iterrows():
-                vid = int(r["id"])
-                veh_count = np.random.randint(20, 200)  # random traffic
-                G.add_node(vid, x=float(r["lon"]), y=float(r["lat"]), vehicles=veh_count)
+        if "length" not in edges.columns:
+            def geodesic_len(row):
+                geom = row.geometry
+                coords = list(geom.coords) if geom else []
+                total = 0.0
+                for (x1, y1), (x2, y2) in zip(coords[:-1], coords[1:]):
+                    total += haversine_m(y1, x1, y2, x2)
+                return total
+            edges["length"] = edges.apply(geodesic_len, axis=1)
 
-            if "length" not in edges.columns:
-                def geodesic_len(row):
-                    geom = row.geometry
-                    coords = list(geom.coords) if geom else []
-                    total = 0.0
-                    for (x1, y1), (x2, y2) in zip(coords[:-1], coords[1:]):
-                        total += haversine_m(y1, x1, y2, x2)
-                    return total
-                edges["length"] = edges.apply(geodesic_len, axis=1)
+        for _, r in edges.iterrows():
+            u, v = int(r["u"]), int(r["v"])
+            if u not in G.nodes or v not in G.nodes:
+                continue
+            length = float(r["length"]) if pd.notna(r["length"]) else 1.0
+            u_veh = G.nodes[u]["vehicles"]
+            v_veh = G.nodes[v]["vehicles"]
+            weight = length + ((u_veh+v_veh)/2) * 5
+            G.add_edge(u, v, length=length, weight=weight)
 
-            for _, r in edges.iterrows():
-                u, v = int(r["u"]), int(r["v"])
-                if u not in G.nodes or v not in G.nodes:
-                    continue
-                length = float(r["length"]) if pd.notna(r["length"]) else 1.0
-                u_veh = G.nodes[u]["vehicles"]
-                v_veh = G.nodes[v]["vehicles"]
-                weight = length + ((u_veh+v_veh)/2) * 5
-                G.add_edge(u, v, length=length, weight=weight)
+        s_node = nearest_node(nodes, s_lat, s_lon)
+        e_node = nearest_node(nodes, e_lat, e_lon)
 
-            s_node = nearest_node(nodes, s_lat, s_lon)
-            e_node = nearest_node(nodes, e_lat, e_lon)
+        # Compute alternative routes (skip duplicates)
+        paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
+        routes = []
+        seen = set()
+        for path in paths_iter:
+            path_tuple = tuple(path)
+            if path_tuple in seen:
+                continue
+            seen.add(path_tuple)
+            L, w, vehicles = 0.0, 0.0, 0
+            for n in path:
+                vehicles += G.nodes[n]["vehicles"]
+            for i in range(len(path)-1):
+                d = G[path[i]][path[i+1]]
+                d = d if isinstance(d, dict) else list(d.values())[0]
+                L += d.get("length", 0.0)
+                w += d.get("weight", d.get("length", 0.0))
+            routes.append({"path": path, "length": L, "weight": w, "vehicles": vehicles})
+            if len(routes) >= K:
+                break
 
-            # Compute K routes
-            paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
-            routes = []
-            for idx, path in enumerate(paths_iter):
-                L, w, vehicles = 0.0, 0.0, 0
-                for n in path:
-                    vehicles += G.nodes[n]["vehicles"]
-                for i in range(len(path)-1):
-                    d = G[path[i]][path[i+1]]
-                    d = d if isinstance(d, dict) else list(d.values())[0]
-                    L += d.get("length", 0.0)
-                    w += d.get("weight", d.get("length", 0.0))
-                routes.append({"path": path, "length": L, "weight": w, "vehicles": vehicles})
-                if idx >= K-1:
-                    break
+        best_route = min(routes, key=lambda r: r["weight"])
 
-            best_route = min(routes, key=lambda r: r["weight"])
-
-            # Map rendering
+        # Map rendering inside a stable container
+        with st.container():
             m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13, tiles="cartodbpositron")
             folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
             folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
@@ -154,20 +157,12 @@ with tabs[0]:
 
             st_folium(m, width=1000, height=500)
 
-            # Summary
-            st.subheader("📌 5 Point Summary")
-            st.markdown(f"""
-            - Best route selected: **{start_text} → {end_text}**  
-            - Total distance: **{best_route['length']/1000:.2f} km**  
-            - Estimated time: **{(best_route['length']/1000/25)*60:.1f} min**  
-            - Vehicles on route: **{best_route['vehicles']}**  
-            - Alternate routes: **{len(routes)-1}** explored  
-            """)
-
-with tabs[1]:
-    st.header("📈 Analytics")
-    st.info("Future section: traffic trend analysis, congestion heatmaps, density charts.")
-
-with tabs[2]:
-    st.header("🎥 Footages")
-    st.info("Future section: integrate live camera feeds or uploaded crowd footage.")
+        # Summary
+        st.subheader("📌 5 Point Summary")
+        st.markdown(f"""
+        - Best route selected: **{start_text} → {end_text}**  
+        - Total distance: **{best_route['length']/1000:.2f} km**  
+        - Estimated time: **{(best_route['length']/1000/25)*60:.1f} min**  
+        - Vehicles on route: **{best_route['vehicles']}**  
+        - Alternate routes: **{len(routes)-1}** explored  
+        """)
