@@ -3,16 +3,14 @@ import folium
 from streamlit_folium import st_folium
 import networkx as nx
 from pyrosm import OSM
-from geopy.geocoders import Nominatim
 import numpy as np
 import pandas as pd
 import math
-import os
 
 # Path to your OSM PBF file
-PBF_PATH = "/workspaces/Map/planet_75.74,22.649_75.986,22.795.osm.pbf"
+PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"
 
-# ---------- Helpers ----------
+# ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
     R = 6371000.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -33,42 +31,54 @@ def color_cycle(n):
             "cadetblue", "black", "pink", "brown"]
     return [base[i % len(base)] for i in range(n)]
 
-# ---------- Streamlit Layout ----------
+# ----------------- Offline Geocoder -----------------
+@st.cache_resource
+def load_places():
+    osm = OSM(PBF_PATH)
+    return osm.get_pois(custom_filter={"name": True})
+
+places = load_places()
+
+def offline_geocode(query):
+    """Return lat/lon for the best matching place name from OSM file"""
+    results = places[places["name"].str.contains(query, case=False, na=False)]
+    if len(results) == 0:
+        return None
+    row = results.iloc[0]
+    return {"latitude": row["lat"], "longitude": row["lon"], "name": row["name"]}
+
+# ----------------- Streamlit Layout -----------------
 st.set_page_config(page_title="Smart Routing - Indore", layout="wide")
 
-# Top navigation
 tabs = st.tabs(["📊 Dashboard", "📈 Analytics", "🎥 Footages"])
 
-with tabs[0]:  # Dashboard
-    st.title("🚦 Smart Traffic Routing - Indore")
+with tabs[0]:
+    st.title("🚦 Smart Traffic Routing - Indore (Offline)")
 
     # Sidebar inputs
     st.sidebar.header("Route Planner")
     start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
     end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
-    K = st.sidebar.slider("Number of Alternative Routes", 1, 10, 3)
+    K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
 
     run_button = st.sidebar.button("Find Routes")
 
-    # Process when button clicked
     if run_button:
-        # Geocode start/end
-        geocoder = Nominatim(user_agent="indore_routes")
-        s_loc = geocoder.geocode(start_text + ", Indore, India")
-        e_loc = geocoder.geocode(end_text + ", Indore, India")
+        # Use offline geocoding
+        s_loc = offline_geocode(start_text)
+        e_loc = offline_geocode(end_text)
 
         if not s_loc or not e_loc:
-            st.error("Could not geocode addresses. Try full names.")
+            st.error("❌ Could not find one of the addresses in local OSM data")
         else:
-            s_lat, s_lon = s_loc.latitude, s_loc.longitude
-            e_lat, e_lon = e_loc.latitude, e_loc.longitude
+            s_lat, s_lon = s_loc["latitude"], s_loc["longitude"]
+            e_lat, e_lon = e_loc["latitude"], e_loc["longitude"]
 
-            # Load OSM network (subgraph for speed)
+            # Load OSM network
             osm = OSM(PBF_PATH)
             nodes_all, edges_all = osm.get_network(nodes=True, network_type="driving")
 
             # Crop bounding box
-            margin_km = 2.0
             lat_min, lat_max = min(s_lat, e_lat)-0.02, max(s_lat, e_lat)+0.02
             lon_min, lon_max = min(s_lon, e_lon)-0.02, max(s_lon, e_lon)+0.02
             nodes = nodes_all[(nodes_all["lat"] >= lat_min) & (nodes_all["lat"] <= lat_max) &
@@ -81,7 +91,7 @@ with tabs[0]:  # Dashboard
             np.random.seed()
             for _, r in nodes.iterrows():
                 vid = int(r["id"])
-                veh_count = np.random.randint(20, 200)
+                veh_count = np.random.randint(20, 200)  # random traffic
                 G.add_node(vid, x=float(r["lon"]), y=float(r["lat"]), vehicles=veh_count)
 
             if "length" not in edges.columns:
@@ -154,10 +164,10 @@ with tabs[0]:  # Dashboard
             - Alternate routes: **{len(routes)-1}** explored  
             """)
 
-with tabs[1]:  # Analytics
+with tabs[1]:
     st.header("📈 Analytics")
     st.info("Future section: traffic trend analysis, congestion heatmaps, density charts.")
 
-with tabs[2]:  # Footages
+with tabs[2]:
     st.header("🎥 Footages")
     st.info("Future section: integrate live camera feeds or uploaded crowd footage.")
