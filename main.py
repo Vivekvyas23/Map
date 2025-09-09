@@ -9,7 +9,7 @@ import math
 import os
 
 # Path to your OSM PBF file
-PBF_PATH = "indore.osm.pbf"
+PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"
 
 # ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
