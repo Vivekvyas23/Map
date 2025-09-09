@@ -6,7 +6,6 @@ from pyrosm import OSM
 import numpy as np
 import pandas as pd
 import math
-import os
 
 # Path to your OSM PBF file
 PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"
@@ -114,15 +113,14 @@ if run_button:
         s_node = nearest_node(nodes, s_lat, s_lon)
         e_node = nearest_node(nodes, e_lat, e_lon)
 
-        # Compute alternative routes (skip duplicates)
+        # Compute K alternative routes (Yen-style uniqueness check)
         paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
         routes = []
-        seen = set()
+        seen = []
         for path in paths_iter:
-            path_tuple = tuple(path)
-            if path_tuple in seen:
+            # skip if path is very similar to an existing one
+            if any(set(path) == set(p["path"]) for p in seen):
                 continue
-            seen.add(path_tuple)
             L, w, vehicles = 0.0, 0.0, 0
             for n in path:
                 vehicles += G.nodes[n]["vehicles"]
@@ -131,7 +129,9 @@ if run_button:
                 d = d if isinstance(d, dict) else list(d.values())[0]
                 L += d.get("length", 0.0)
                 w += d.get("weight", d.get("length", 0.0))
-            routes.append({"path": path, "length": L, "weight": w, "vehicles": vehicles})
+            route = {"path": path, "length": L, "weight": w, "vehicles": vehicles}
+            routes.append(route)
+            seen.append(route)
             if len(routes) >= K:
                 break
 
@@ -141,9 +141,12 @@ if run_button:
             best_route = min(routes, key=lambda r: r["weight"])
 
             # Map rendering
-            m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13, tiles="cartodbpositron")
-            folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
-            folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
+            m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2],
+                           zoom_start=13, tiles="cartodbpositron")
+            folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text,
+                          icon=folium.Icon(color="green")).add_to(m)
+            folium.Marker([e_lat, e_lon], tooltip="End: "+end_text,
+                          icon=folium.Icon(color="red")).add_to(m)
 
             cols = color_cycle(len(routes))
             for i, r in enumerate(routes, start=1):
@@ -153,11 +156,13 @@ if run_button:
                 label = f"Route {i}: {km:.2f} km, ETA {eta:.1f} min, {r['vehicles']} vehicles"
 
                 if r is best_route:
-                    folium.PolyLine(coords, color="green", weight=8, opacity=1, tooltip=label).add_to(m)
+                    folium.PolyLine(coords, color="green", weight=8, opacity=1,
+                                    tooltip=label).add_to(m)
                 else:
-                    folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
+                    folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6,
+                                    tooltip=label).add_to(m)
 
-            # Store map + results in session_state
+            # Save to session_state (so map persists)
             st.session_state["map_obj"] = m
             st.session_state["routes"] = routes
             st.session_state["best_route"] = best_route
