@@ -1,6 +1,6 @@
 import streamlit as st
 import folium
-from streamlit_folium import st_folium
+from streamlit_folium import folium_static
 from pyrosm import OSM
 import networkx as nx
 import numpy as np
@@ -12,7 +12,7 @@ PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"  # <-- Your PBF file path
 # ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
     R = 6371000.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
+    p1, p2 = math.radians(lat1), math.radians(lon1)
     dphi = math.radians(lat2 - lat1)
     dlmb = math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlmb/2)**2
@@ -174,13 +174,7 @@ else:
 
 # Display the saved map and summary if routing done
 if st.session_state.routing_done and "map_obj" in st.session_state:
-    st_folium(
-        st.session_state["map_obj"],
-        width=1000,
-        height=500,
-        key="static_map",
-        allow_unsafe_jscode=True,
-    )
+    folium_static(st.session_state["map_obj"], width=1000, height=500)
     best_route = st.session_state["best_route"]
     start_text = st.session_state.get("start_text", "Start")
     end_text = st.session_state.get("end_text", "End")
