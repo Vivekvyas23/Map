@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import math
 
-PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"   # <-- Path to your PBF file
+PBF_PATH = "planet_75.74,22.649_75.986,22.795.osm.pbf"  # <-- Your PBF file path
 
 # ----------------- Helpers -----------------
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -30,13 +30,19 @@ def color_cycle(n):
             "cadetblue", "black", "pink", "brown"]
     return [base[i % len(base)] for i in range(n)]
 
-# ----------------- Offline POI Loader -----------------
+# ----------------- Cached Data Loaders -----------------
 @st.cache_resource
 def load_places():
     osm = OSM(PBF_PATH)
     return osm.get_pois(custom_filter={"name": True})
 
+@st.cache_resource
+def load_network():
+    osm = OSM(PBF_PATH)
+    return osm.get_network(nodes=True, network_type="driving")
+
 places = load_places()
+nodes_all, edges_all = load_network()
 
 def offline_geocode(query):
     results = places[places["name"].str.contains(query, case=False, na=False)]
@@ -45,24 +51,16 @@ def offline_geocode(query):
     row = results.iloc[0]
     return {"latitude": row["lat"], "longitude": row["lon"], "name": row["name"]}
 
-# ----------------- Network Loader -----------------
-@st.cache_resource
-def load_network():
-    osm = OSM(PBF_PATH)
-    return osm.get_network(nodes=True, network_type="driving")
-
-nodes_all, edges_all = load_network()
-
-# ----------------- Streamlit -----------------
+# ----------------- Streamlit App -----------------
 st.set_page_config(page_title="Traffic Routing", layout="wide")
 st.title("🚦 Traffic-Aware Routing (Indore)")
 
-# Initialize session state flag
+# Initialize routing_done flag
 if "routing_done" not in st.session_state:
     st.session_state.routing_done = False
 
 if not st.session_state.routing_done:
-    # Show inputs and button only if routing not done
+    # Show inputs only if routing not done
     st.sidebar.header("Route Planner")
     start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
     end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
@@ -105,7 +103,7 @@ if not st.session_state.routing_done:
 
             for _, r in edges.iterrows():
                 u, v = int(r["u"]), int(r["v"])
-                if u not in G.nodes or v not in G.nodes: 
+                if u not in G.nodes or v not in G.nodes:
                     continue
                 length = float(r["length"]) if pd.notna(r["length"]) else 1.0
                 u_veh, v_veh = G.nodes[u]["vehicles"], G.nodes[v]["vehicles"]
@@ -141,7 +139,7 @@ if not st.session_state.routing_done:
             else:
                 best_route = min(routes, key=lambda r: r["weight"])
 
-                # Build folium map only once here
+                # Build folium map once
                 m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13)
                 folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
                 folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
@@ -155,7 +153,6 @@ if not st.session_state.routing_done:
                     else:
                         folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
 
-                    # Add vehicle count at intersections
                     for n in r["path"]:
                         if G.degree(n) >= 3:
                             folium.CircleMarker(
@@ -164,7 +161,7 @@ if not st.session_state.routing_done:
                                 tooltip=f"Node {n}: {G.nodes[n]['vehicles']} vehicles"
                             ).add_to(m)
 
-                # Store map and best route in session state
+                # Save map and info in session state
                 st.session_state["map_obj"] = m
                 st.session_state["best_route"] = best_route
                 st.session_state["start_text"] = start_text
@@ -173,11 +170,17 @@ if not st.session_state.routing_done:
                 st.session_state.routing_done = True
 
 else:
-    # After routing done, hide inputs and button, just show map and summary
     st.info("Routing completed. To run a new route, please restart the app.")
 
+# Display the saved map and summary if routing done
 if st.session_state.routing_done and "map_obj" in st.session_state:
-    st_folium(st.session_state["map_obj"], width=1000, height=500, key="map")
+    st_folium(
+        st.session_state["map_obj"],
+        width=1000,
+        height=500,
+        key="static_map",
+        allow_unsafe_jscode=True,
+    )
     best_route = st.session_state["best_route"]
     start_text = st.session_state.get("start_text", "Start")
     end_text = st.session_state.get("end_text", "End")
