@@ -21,7 +21,6 @@ def haversine_m(lat1, lon1, lat2, lon2):
 def nearest_node(nodes_df, lat, lon):
     lat_arr = nodes_df["lat"].to_numpy()
     lon_arr = nodes_df["lon"].to_numpy()
-    # Use haversine distance for better accuracy
     distances = np.array([haversine_m(lat, lon, la, lo) for la, lo in zip(lat_arr, lon_arr)])
     idx = int(np.argmin(distances))
     return int(nodes_df.iloc[idx]["id"])
@@ -52,6 +51,8 @@ def load_network():
     osm = OSM(PBF_PATH)
     return osm.get_network(nodes=True, network_type="driving")
 
+nodes_all, edges_all = load_network()
+
 # ----------------- Streamlit -----------------
 st.set_page_config(page_title="Traffic Routing", layout="wide")
 st.title("🚦 Traffic-Aware Routing (Indore)")
@@ -62,11 +63,11 @@ start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
 end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
 K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
 
-# Load network once
-nodes_all, edges_all = load_network()
+# Initialize session state flags and storage
+if "routing_done" not in st.session_state:
+    st.session_state.routing_done = False
 
-# -------- Run only when button pressed --------
-if st.sidebar.button("Find Route"):
+if st.sidebar.button("Find Route") and not st.session_state.routing_done:
     s_loc = offline_geocode(start_text)
     e_loc = offline_geocode(end_text)
 
@@ -168,9 +169,10 @@ if st.sidebar.button("Find Route"):
             st.session_state["start_text"] = start_text
             st.session_state["end_text"] = end_text
             st.session_state["K"] = K
+            st.session_state.routing_done = True
 
 # -------- Display Saved Map (persistent) --------
-if "map_obj" in st.session_state:
+if st.session_state.routing_done and "map_obj" in st.session_state:
     st_folium(st.session_state["map_obj"], width=1000, height=500, key="map")
     best_route = st.session_state["best_route"]
     start_text = st.session_state.get("start_text", "Start")
@@ -183,3 +185,7 @@ if "map_obj" in st.session_state:
     - Vehicles: **{best_route['vehicles']}**  
     - Alternatives: **{K-1}**  
     """)
+
+else:
+    st.info("Enter start and end locations, then press 'Find Route' to calculate routes.")
+
