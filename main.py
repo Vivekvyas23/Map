@@ -21,8 +21,9 @@ def haversine_m(lat1, lon1, lat2, lon2):
 def nearest_node(nodes_df, lat, lon):
     lat_arr = nodes_df["lat"].to_numpy()
     lon_arr = nodes_df["lon"].to_numpy()
-    d2 = (lat_arr-lat)**2 + (lon_arr-lon)**2
-    idx = int(np.argmin(d2))
+    # Use haversine distance for better accuracy
+    distances = np.array([haversine_m(lat, lon, la, lo) for la, lo in zip(lat_arr, lon_arr)])
+    idx = int(np.argmin(distances))
     return int(nodes_df.iloc[idx]["id"])
 
 def color_cycle(n):
@@ -45,6 +46,12 @@ def offline_geocode(query):
     row = results.iloc[0]
     return {"latitude": row["lat"], "longitude": row["lon"], "name": row["name"]}
 
+# ----------------- Network Loader -----------------
+@st.cache_resource
+def load_network():
+    osm = OSM(PBF_PATH)
+    return osm.get_network(nodes=True, network_type="driving")
+
 # ----------------- Streamlit -----------------
 st.set_page_config(page_title="Traffic Routing", layout="wide")
 st.title("🚦 Traffic-Aware Routing (Indore)")
@@ -54,6 +61,9 @@ st.sidebar.header("Route Planner")
 start_text = st.sidebar.text_input("Start Location", "Rajwada Palace")
 end_text = st.sidebar.text_input("End Location", "Vijay Nagar")
 K = st.sidebar.slider("Number of Alternative Routes", 1, 5, 3)
+
+# Load network once
+nodes_all, edges_all = load_network()
 
 # -------- Run only when button pressed --------
 if st.sidebar.button("Find Route"):
@@ -65,10 +75,6 @@ if st.sidebar.button("Find Route"):
     else:
         s_lat, s_lon = s_loc["latitude"], s_loc["longitude"]
         e_lat, e_lon = e_loc["latitude"], e_loc["longitude"]
-
-        # Load OSM network
-        osm = OSM(PBF_PATH)
-        nodes_all, edges_all = osm.get_network(nodes=True, network_type="driving")
 
         # Crop bounding box
         lat_min, lat_max = min(s_lat, e_lat)-0.02, max(s_lat, e_lat)+0.02
@@ -109,7 +115,11 @@ if st.sidebar.button("Find Route"):
         e_node = nearest_node(nodes, e_lat, e_lon)
 
         # Compute routes
-        paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
+        try:
+            paths_iter = nx.shortest_simple_paths(G, s_node, e_node, weight="weight")
+        except nx.NetworkXNoPath:
+            st.error("❌ No path found between the selected locations.")
+            paths_iter = []
         routes = []
         for idx, path in enumerate(paths_iter):
             L, w, vehicles = 0.0, 0.0, 0
@@ -124,39 +134,48 @@ if st.sidebar.button("Find Route"):
             if idx >= K-1:
                 break
 
-        best_route = min(routes, key=lambda r: r["weight"])
+        if not routes:
+            st.error("❌ No routes found.")
+        else:
+            best_route = min(routes, key=lambda r: r["weight"])
 
-        # Build folium map
-        m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13)
-        folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
-        folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
+            # Build folium map only once here
+            m = folium.Map(location=[(s_lat+e_lat)/2, (s_lon+e_lon)/2], zoom_start=13)
+            folium.Marker([s_lat, s_lon], tooltip="Start: "+start_text, icon=folium.Icon(color="green")).add_to(m)
+            folium.Marker([e_lat, e_lon], tooltip="End: "+end_text, icon=folium.Icon(color="red")).add_to(m)
 
-        cols = color_cycle(len(routes))
-        for i, r in enumerate(routes, start=1):
-            coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in r["path"]]
-            label = f"Route {i}: {r['length']/1000:.2f} km, {r['vehicles']} vehicles"
-            if r is best_route:
-                folium.PolyLine(coords, color="green", weight=8, opacity=1, tooltip=label).add_to(m)
-            else:
-                folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
+            cols = color_cycle(len(routes))
+            for i, r in enumerate(routes, start=1):
+                coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in r["path"]]
+                label = f"Route {i}: {r['length']/1000:.2f} km, {r['vehicles']} vehicles"
+                if r is best_route:
+                    folium.PolyLine(coords, color="green", weight=8, opacity=1, tooltip=label).add_to(m)
+                else:
+                    folium.PolyLine(coords, color=cols[i-1], weight=5, opacity=0.6, tooltip=label).add_to(m)
 
-            # Add vehicle count at intersections
-            for n in r["path"]:
-                if G.degree(n) >= 3:
-                    folium.CircleMarker(
-                        [G.nodes[n]["y"], G.nodes[n]["x"]],
-                        radius=5, color="black", fill=True, fill_color="yellow",
-                        tooltip=f"Node {n}: {G.nodes[n]['vehicles']} vehicles"
-                    ).add_to(m)
+                # Add vehicle count at intersections
+                for n in r["path"]:
+                    if G.degree(n) >= 3:
+                        folium.CircleMarker(
+                            [G.nodes[n]["y"], G.nodes[n]["x"]],
+                            radius=5, color="black", fill=True, fill_color="yellow",
+                            tooltip=f"Node {n}: {G.nodes[n]['vehicles']} vehicles"
+                        ).add_to(m)
 
-        # Save map so it persists (no blinking)
-        st.session_state["map_obj"] = m
-        st.session_state["best_route"] = best_route
+            # Store map and best route in session state
+            st.session_state["map_obj"] = m
+            st.session_state["best_route"] = best_route
+            st.session_state["start_text"] = start_text
+            st.session_state["end_text"] = end_text
+            st.session_state["K"] = K
 
 # -------- Display Saved Map (persistent) --------
 if "map_obj" in st.session_state:
-    st_folium(st.session_state["map_obj"], width=1000, height=500)
+    st_folium(st.session_state["map_obj"], width=1000, height=500, key="map")
     best_route = st.session_state["best_route"]
+    start_text = st.session_state.get("start_text", "Start")
+    end_text = st.session_state.get("end_text", "End")
+    K = st.session_state.get("K", 3)
     st.subheader("📌 Summary")
     st.markdown(f"""
     - Best route: **{start_text} → {end_text}**  
